@@ -53,11 +53,12 @@ struct Vulkan
     VkPipelineLayout pipeline_layout;
 
     VkCommandPool command_pool;
-    VkCommandBuffer command_buffer;
 
-    VkSemaphore next_image_semaphore;
-    VkSemaphore render_semaphore;
-    VkFence draw_fence;
+    VkCommandBuffer command_buffer[16];
+
+    VkSemaphore next_image_semaphore[16];
+    VkSemaphore render_semaphore[16];
+    VkFence frame_fence[16];
 };
 
 
@@ -141,7 +142,7 @@ int main()
             return 1;
         }
         glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
-        glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
+        // glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
         const u64 window_width = 1920;
         const u64 window_height = 1080;
@@ -920,83 +921,92 @@ int main()
         }
     }
 
+    // Command buffer.
     {
         const VkCommandBufferAllocateInfo command_buffer_allocate_info = {
             .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
             .pNext = NULL,
             .commandPool = vk.command_pool,
             .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
-            .commandBufferCount = 1,
+            .commandBufferCount = vk.swap_chain_image_count,
         };
         const VkResult res = vkAllocateCommandBuffers(
             vk.logical_dev,
             &command_buffer_allocate_info,
-            &vk.command_buffer);
+            vk.command_buffer);
         if(res != VK_SUCCESS)
         {
             LOG_ERROR("'vkAllocateCommandBuffers' failed %s.", string_VkResult(res));
             return 1;
         }
     }
-
+    
+    for(u64 i_swap_chain = 0; i_swap_chain < vk.swap_chain_image_count; i_swap_chain++)
     {
-        const VkSemaphoreCreateInfo semaphore_create_info = {
-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-            .pNext = NULL,
-            .flags = 0,
-        };
-        // TODO(mfritz): Replace allocator;
-        const VkResult res = vkCreateSemaphore(
-            vk.logical_dev,
-            &semaphore_create_info,
-            NULL,
-            &vk.next_image_semaphore);
-        if(res != VK_SUCCESS)
+
+        // Next image semaphore.
         {
-            LOG_ERROR("'vkCreateSemaphore' failed %s.", string_VkResult(res));
-            return 1;
+            const VkSemaphoreCreateInfo semaphore_create_info = {
+                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+                .pNext = NULL,
+                .flags = 0,
+            };
+            // TODO(mfritz): Replace allocator;
+            const VkResult res = vkCreateSemaphore(
+                vk.logical_dev,
+                &semaphore_create_info,
+                NULL,
+                &vk.next_image_semaphore[i_swap_chain]);
+            if(res != VK_SUCCESS)
+            {
+                LOG_ERROR("'vkCreateSemaphore' failed %s.", string_VkResult(res));
+                return 1;
+            }
+        }
+        
+        // Render sempahore.
+        {
+            const VkSemaphoreCreateInfo semaphore_create_info = {
+                .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
+                .pNext = NULL,
+                .flags = 0,
+            };
+            // TODO(mfritz): Replace allocator;
+            const VkResult res = vkCreateSemaphore(
+                vk.logical_dev,
+                &semaphore_create_info,
+                NULL,
+                &vk.render_semaphore[i_swap_chain]);
+            if(res != VK_SUCCESS)
+            {
+                LOG_ERROR("'vkCreateSemaphore' failed %s.", string_VkResult(res));
+                return 1;
+            }
+        }
+    
+        // Frame fence.
+        {
+            const VkFenceCreateInfo fence_create_info = {
+                .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+                .pNext = NULL,
+                .flags = VK_FENCE_CREATE_SIGNALED_BIT,
+            };
+            // TODO(mfritz): Replace allocator;
+            const VkResult res = vkCreateFence(
+                vk.logical_dev,
+                &fence_create_info,
+                NULL,
+                &vk.frame_fence[i_swap_chain]);
+            if(res != VK_SUCCESS)
+            {
+                LOG_ERROR("'vkCreateFence' failed %s.", string_VkResult(res));
+                return 1;
+            }
         }
     }
 
-    {
-        const VkSemaphoreCreateInfo semaphore_create_info = {
-            .sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO,
-            .pNext = NULL,
-            .flags = 0,
-        };
-        // TODO(mfritz): Replace allocator;
-        const VkResult res = vkCreateSemaphore(
-            vk.logical_dev,
-            &semaphore_create_info,
-            NULL,
-            &vk.render_semaphore);
-        if(res != VK_SUCCESS)
-        {
-            LOG_ERROR("'vkCreateSemaphore' failed %s.", string_VkResult(res));
-            return 1;
-        }
-    }
-
-    {
-        const VkFenceCreateInfo fence_create_info = {
-            .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
-            .pNext = NULL,
-            .flags = VK_FENCE_CREATE_SIGNALED_BIT,
-        };
-        // TODO(mfritz): Replace allocator;
-        const VkResult res = vkCreateFence(
-            vk.logical_dev,
-            &fence_create_info,
-            NULL,
-            &vk.draw_fence);
-        if(res != VK_SUCCESS)
-        {
-            LOG_ERROR("'vkCreateFence' failed %s.", string_VkResult(res));
-            return 1;
-        }
-    }
-
-    for(;;)
+    u64 frame = 0;
+    for(;; frame++)
     {
         glfwPollEvents();
 
@@ -1005,9 +1015,16 @@ int main()
             break;
         }
 
+        const u64 swap_chain_idx = frame % vk.swap_chain_image_count;
+
         // Wait for the previous frame to finish.
         {
-            const VkResult res = vkWaitForFences(vk.logical_dev, 1, &vk.draw_fence, 1, u64_MAX);
+            const VkResult res = vkWaitForFences(
+                vk.logical_dev,
+                1,
+                &vk.frame_fence[swap_chain_idx],
+                1,
+                u64_MAX);
             if(res != VK_SUCCESS)
             {
                 LOG_ERROR("'vkWaitForFences' failed %s.", string_VkResult(res));
@@ -1015,7 +1032,7 @@ int main()
             }
         }
         {
-            const VkResult res = vkResetFences(vk.logical_dev, 1, &vk.draw_fence);
+            const VkResult res = vkResetFences(vk.logical_dev, 1, &vk.frame_fence[swap_chain_idx]);
             if(res != VK_SUCCESS)
             {
                 LOG_ERROR("'vkResetFences' failed %s.", string_VkResult(res));
@@ -1030,7 +1047,7 @@ int main()
                 vk.logical_dev,
                 vk.swap_chain,
                 u64_MAX,
-                vk.next_image_semaphore,
+                vk.next_image_semaphore[swap_chain_idx],
                 NULL,
                 &image_index);
             if(res != VK_SUCCESS)
@@ -1041,6 +1058,7 @@ int main()
         }
 
         // Begin command recording.
+        const VkCommandBuffer cmd_buf = vk.command_buffer[swap_chain_idx];
         {
             const VkCommandBufferBeginInfo command_buffer_begin_info = {
                 .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
@@ -1049,7 +1067,7 @@ int main()
                 .pInheritanceInfo = NULL,
             };
             const VkResult res = vkBeginCommandBuffer(
-                vk.command_buffer,
+                cmd_buf,
                 &command_buffer_begin_info);
             if(res != VK_SUCCESS)
             {
@@ -1091,7 +1109,7 @@ int main()
                 .imageMemoryBarrierCount = 1,
                 .pImageMemoryBarriers = &image_memory_barrier,
             };
-            vkCmdPipelineBarrier2(vk.command_buffer, &dependency_info);
+            vkCmdPipelineBarrier2(cmd_buf, &dependency_info);
         }
 
         // Begin rendering.
@@ -1134,14 +1152,14 @@ int main()
                 .pDepthAttachment = VK_NULL_HANDLE,
                 .pStencilAttachment = VK_NULL_HANDLE,
             };
-            vkCmdBeginRendering(vk.command_buffer, &rendering_info);
+            vkCmdBeginRendering(cmd_buf, &rendering_info);
         }
 
-        vkCmdBindPipeline(vk.command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.graphics_pipeline);
-        vkCmdSetViewport(vk.command_buffer, 0, 1, &viewport);
-        vkCmdSetScissor(vk.command_buffer, 0, 1, &scissor);
-        vkCmdDraw(vk.command_buffer, 3, 1, 0, 0);
-        vkCmdEndRendering(vk.command_buffer);
+        vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.graphics_pipeline);
+        vkCmdSetViewport(cmd_buf, 0, 1, &viewport);
+        vkCmdSetScissor(cmd_buf, 0, 1, &scissor);
+        vkCmdDraw(cmd_buf, 3, 1, 0, 0);
+        vkCmdEndRendering(cmd_buf);
 
         // Transition swap chain image to present.
         {
@@ -1178,20 +1196,10 @@ int main()
                 .imageMemoryBarrierCount = 1,
                 .pImageMemoryBarriers = &image_memory_barrier,
             };
-            vkCmdPipelineBarrier2(vk.command_buffer, &dependency_info);
+            vkCmdPipelineBarrier2(cmd_buf, &dependency_info);
         }
 
-        vkEndCommandBuffer(vk.command_buffer);
-
-        {
-            const VkResult res = vkQueueWaitIdle(vk.dev_queue);
-            if(res != VK_SUCCESS)
-            {
-                LOG_ERROR("'vkQueueWaitIdle' failed %s.", string_VkResult(res));
-                return 1;
-            }
-        }
-
+        vkEndCommandBuffer(cmd_buf);
 
         // Submit.
         {
@@ -1230,7 +1238,7 @@ int main()
             //     .signalSemaphoreInfoCount = 1,
             //     .pSignalSemaphoreInfos = &render_semaphore_submit_info,
             // };
-            // const VkResult res = vkQueueSubmit2(vk.dev_queue, 1, &submit_info, vk.draw_fence); 
+            // const VkResult res = vkQueueSubmit2(vk.dev_queue, 1, &submit_info, vk.frame_fence); 
             // if(res != VK_SUCCESS)
             // {
             //     LOG_ERROR("'vkQueueSubmit2' failed %s.", string_VkResult(res));
@@ -1242,14 +1250,14 @@ int main()
                 .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 .pNext = NULL,
                 .waitSemaphoreCount = 1,
-                .pWaitSemaphores = &vk.next_image_semaphore,
+                .pWaitSemaphores = &vk.next_image_semaphore[swap_chain_idx],
                 .pWaitDstStageMask = &wait_dst_stage_mask,
                 .commandBufferCount = 1,
-                .pCommandBuffers = &vk.command_buffer,
+                .pCommandBuffers = &cmd_buf,
                 .signalSemaphoreCount = 1,
-                .pSignalSemaphores = &vk.render_semaphore,
+                .pSignalSemaphores = &vk.render_semaphore[swap_chain_idx],
             };
-            const VkResult res = vkQueueSubmit(vk.dev_queue, 1, &submit_info, vk.draw_fence);
+            const VkResult res = vkQueueSubmit(vk.dev_queue, 1, &submit_info, vk.frame_fence[swap_chain_idx]);
             if(res != VK_SUCCESS)
             {
                 LOG_ERROR("'vkQueueSubmit' failed %s.", string_VkResult(res));
@@ -1262,8 +1270,11 @@ int main()
             const VkPresentInfoKHR present_info = {
                 .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
                 .pNext = NULL,
+                // No need to sync on previous frame presents:
+                // https://docs.vulkan.org/refpages/latest/refpages/source/vkQueuePresentKHR.html
+                // "However, presentation requests sent to a particular queue are always performed in order."
                 .waitSemaphoreCount = 1,
-                .pWaitSemaphores = &vk.render_semaphore,
+                .pWaitSemaphores = &vk.render_semaphore[swap_chain_idx],
                 .swapchainCount = 1,
                 .pSwapchains = &vk.swap_chain,
                 .pImageIndices = &image_index,
@@ -1290,15 +1301,15 @@ int main()
 
     // TODO(mfritz): Replace allocator FOR ALL.
     {
-        vkDestroyFence(vk.logical_dev, vk.draw_fence, NULL);
-        vkDestroySemaphore(vk.logical_dev, vk.render_semaphore, NULL);
-        vkDestroySemaphore(vk.logical_dev, vk.next_image_semaphore, NULL);
-        vkDestroyCommandPool(vk.logical_dev, vk.command_pool, NULL);
-        vkDestroyPipeline(vk.logical_dev, vk.graphics_pipeline, NULL);
         for(u64 i = 0; i < vk.swap_chain_image_count; i++)
         {
+            vkDestroyFence(vk.logical_dev, vk.frame_fence[i], NULL);
+            vkDestroySemaphore(vk.logical_dev, vk.render_semaphore[i], NULL);
+            vkDestroySemaphore(vk.logical_dev, vk.next_image_semaphore[i], NULL);
             vkDestroyImageView(vk.logical_dev, vk.swap_chain_image_views[i], NULL);
         }
+        vkDestroyCommandPool(vk.logical_dev, vk.command_pool, NULL);
+        vkDestroyPipeline(vk.logical_dev, vk.graphics_pipeline, NULL);
         vkDestroyShaderModule(vk.logical_dev, vk.shader_module, NULL);
         vkDestroyPipelineLayout(vk.logical_dev, vk.pipeline_layout, NULL);
         vkDestroySwapchainKHR(vk.logical_dev, vk.swap_chain, NULL);
