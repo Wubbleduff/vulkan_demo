@@ -55,7 +55,7 @@ struct Vulkan
     VkCommandPool command_pool;
     VkCommandBuffer command_buffer;
 
-    VkSemaphore present_semaphore;
+    VkSemaphore next_image_semaphore;
     VkSemaphore render_semaphore;
     VkFence draw_fence;
 };
@@ -198,7 +198,7 @@ int main()
         LOG("PROFILE Match glfw extensions: %lius", END_TIMER_US(timer));
     }
 
-    // Vulkan vk.instance layers.
+    // Vulkan instance layers.
     const char* vulkan_layers[] = {
         "VK_LAYER_KHRONOS_validation"
     };
@@ -950,7 +950,7 @@ int main()
             vk.logical_dev,
             &semaphore_create_info,
             NULL,
-            &vk.present_semaphore);
+            &vk.next_image_semaphore);
         if(res != VK_SUCCESS)
         {
             LOG_ERROR("'vkCreateSemaphore' failed %s.", string_VkResult(res));
@@ -1030,7 +1030,7 @@ int main()
                 vk.logical_dev,
                 vk.swap_chain,
                 u64_MAX,
-                vk.present_semaphore,
+                vk.next_image_semaphore,
                 NULL,
                 &image_index);
             if(res != VK_SUCCESS)
@@ -1150,7 +1150,9 @@ int main()
                 .pNext = NULL,
                 .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
                 .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                // TODO(mfritz): Why is this "VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT" instead of "VK_PIPELINE_STAGE_2_NONE"?
                 .dstStageMask = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT,
+                // TODO(mfritz): Why is this not "VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT"? Is it because there are no other operations in the pipeline?
                 .dstAccessMask = VK_ACCESS_2_NONE,
                 .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 .newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -1198,7 +1200,7 @@ int main()
             // const VkSemaphoreSubmitInfo present_semaphore_submit_info = {
             //     .sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO,
             //     .pNext = NULL,
-            //     .semaphore = vk.present_semaphore,
+            //     .semaphore = vk.next_image_semaphore,
             //     .value = 0,
             //     .stageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
             //     .deviceIndex = 0,
@@ -1240,7 +1242,7 @@ int main()
                 .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 .pNext = NULL,
                 .waitSemaphoreCount = 1,
-                .pWaitSemaphores = &vk.present_semaphore,
+                .pWaitSemaphores = &vk.next_image_semaphore,
                 .pWaitDstStageMask = &wait_dst_stage_mask,
                 .commandBufferCount = 1,
                 .pCommandBuffers = &vk.command_buffer,
@@ -1290,7 +1292,7 @@ int main()
     {
         vkDestroyFence(vk.logical_dev, vk.draw_fence, NULL);
         vkDestroySemaphore(vk.logical_dev, vk.render_semaphore, NULL);
-        vkDestroySemaphore(vk.logical_dev, vk.present_semaphore, NULL);
+        vkDestroySemaphore(vk.logical_dev, vk.next_image_semaphore, NULL);
         vkDestroyCommandPool(vk.logical_dev, vk.command_pool, NULL);
         vkDestroyPipeline(vk.logical_dev, vk.graphics_pipeline, NULL);
         for(u64 i = 0; i < vk.swap_chain_image_count; i++)
