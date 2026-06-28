@@ -27,7 +27,7 @@ typedef int16_t s16;
 typedef int32_t s32;
 typedef int64_t s64;
 
-
+#define VERTEX_BUFFER_SIZE 64UL * 1024 * 1024
 
 struct Vulkan
 {
@@ -59,8 +59,17 @@ struct Vulkan
     VkSemaphore next_image_semaphore[16];
     VkSemaphore render_semaphore[16];
     VkFence frame_fence[16];
+
+    VkBuffer vertex_buffer;
+    VkDeviceMemory vertex_buffer_memory;
 };
 
+struct VulkanVertex
+{
+    float pos[2];
+    float color[3];
+};
+_Static_assert(sizeof(struct VulkanVertex) == 20, "Incorrect vertex size. Ensure no padding.");
 
 #undef STRINGIZE
 #undef STRINGIZE2
@@ -741,14 +750,33 @@ int main()
         .extent = vk.swap_chain_image_extent,
     };
     {
+        const VkVertexInputBindingDescription vertex_input_binding_desc = {
+            .binding = 0,
+            .stride = sizeof(struct VulkanVertex),
+            .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+        };
+        const VkVertexInputAttributeDescription vertex_input_attribute_descs[] = {
+            {
+                .location = 0,
+                .binding = 0,
+                .format = VK_FORMAT_R32G32_SFLOAT,
+                .offset = offsetof(struct VulkanVertex, pos),
+            },
+            {
+                .location = 1,
+                .binding = 0,
+                .format = VK_FORMAT_R32G32B32_SFLOAT,
+                .offset = offsetof(struct VulkanVertex, color),
+            },
+        };
         const VkPipelineVertexInputStateCreateInfo vertex_input_state_create_info = {
             .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
             .pNext = NULL,
             .flags = 0,
-            .vertexBindingDescriptionCount = 0,
-            .pVertexBindingDescriptions = NULL,
-            .vertexAttributeDescriptionCount = 0,
-            .pVertexAttributeDescriptions = NULL,
+            .vertexBindingDescriptionCount = 1,
+            .pVertexBindingDescriptions = &vertex_input_binding_desc,
+            .vertexAttributeDescriptionCount = ARRAY_COUNT(vertex_input_attribute_descs),
+            .pVertexAttributeDescriptions = vertex_input_attribute_descs,
         };
 
         const VkPipelineInputAssemblyStateCreateInfo input_assembly_state_create_info = {
@@ -1005,6 +1033,128 @@ int main()
         }
     }
 
+    // Vertex buffer.
+    {
+        {
+            const VkBufferCreateInfo buffer_create_info = {
+                .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .pNext = NULL,
+                .flags = 0,
+                .size = VERTEX_BUFFER_SIZE,
+                .usage = VK_BUFFER_USAGE_2_VERTEX_BUFFER_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+                .queueFamilyIndexCount = 0,
+                .pQueueFamilyIndices = NULL,
+            };
+            // TODO(mfritz): Replace allocator.
+            const VkResult res = vkCreateBuffer(
+                vk.logical_dev,
+                &buffer_create_info,
+                NULL,
+                &vk.vertex_buffer);
+            if(res != VK_SUCCESS)
+            {
+                LOG_ERROR("'vkCreateBuffer' failed %s.", string_VkResult(res));
+                return 1;
+            }
+        }
+
+        VkMemoryRequirements mem_req = {0};
+        vkGetBufferMemoryRequirements(
+            vk.logical_dev,
+            vk.vertex_buffer,
+            &mem_req);
+
+        VkPhysicalDeviceMemoryProperties dev_memory_properites = {0};
+        vkGetPhysicalDeviceMemoryProperties(vk.physical_dev, &dev_memory_properites);
+
+        u64 memory_type_idx = u64_MAX;
+        for(u64 i_type = 0; i_type < dev_memory_properites.memoryTypeCount; i_type++)
+        {
+            const u64 memory_type_supported = (1UL << i_type) & mem_req.memoryTypeBits;
+            const u64 req_props = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+            const u64 has_req_props = (dev_memory_properites.memoryTypes[i_type].propertyFlags & req_props) == req_props;
+            if(memory_type_supported && has_req_props)
+            {
+                memory_type_idx = i_type;
+                break;
+            }
+        }
+
+        if(memory_type_idx != u64_MAX)
+        {
+            const VkMemoryAllocateInfo memory_allocate_info = {
+                .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                .pNext = NULL,
+                .allocationSize = mem_req.size,
+                .memoryTypeIndex = memory_type_idx,
+            };
+            // TODO(mfritz): Replace allocator.
+            const VkResult res = vkAllocateMemory(
+                vk.logical_dev,
+                &memory_allocate_info,
+                NULL,
+                &vk.vertex_buffer_memory);
+            if(res != VK_SUCCESS)
+            {
+                LOG_ERROR("'vkAllocateMemory' failed %s.", string_VkResult(res));
+                return 1;
+            }
+        }
+        else
+        {
+            LOG_ERROR("Could not find suitable heap and memory type.");
+            return 1;
+        }
+
+        {
+            const VkResult res = vkBindBufferMemory(
+                vk.logical_dev,
+                vk.vertex_buffer,
+                vk.vertex_buffer_memory,
+                0);
+            if(res != VK_SUCCESS)
+            {
+                LOG_ERROR("'vkBindBufferMemory' failed %s.", string_VkResult(res));
+                return 1;
+            }
+        }
+
+        {
+            void* mapped = NULL;
+            const VkResult res = vkMapMemory(
+                vk.logical_dev,
+                vk.vertex_buffer_memory,
+                0,
+                VK_WHOLE_SIZE,
+                0,
+                &mapped);
+            if(res != VK_SUCCESS)
+            {
+                LOG_ERROR("'vkMapMemory' failed %s.", string_VkResult(res));
+                return 1;
+            }
+
+            struct VulkanVertex verts[3] = {
+                {
+                    .pos = { 0.0f, -0.5f },
+                    .color = { 1.0f, 0.0f, 0.0f },
+                },
+                {
+                    .pos = { 0.5f, 0.5f },
+                    .color = { 0.0f, 1.0f, 0.0f },
+                },
+                {
+                    .pos = { -0.5f, 0.5f },
+                    .color = { 0.0f, 0.0f, 1.0f },
+                },
+            };
+            memcpy(mapped, verts, sizeof(verts));
+
+            vkUnmapMemory(vk.logical_dev, vk.vertex_buffer_memory);
+        }
+    }
+
     u64 frame = 0;
     for(;; frame++)
     {
@@ -1156,6 +1306,13 @@ int main()
         }
 
         vkCmdBindPipeline(cmd_buf, VK_PIPELINE_BIND_POINT_GRAPHICS, vk.graphics_pipeline);
+        const u64 vertex_buffer_offsets = 0;
+        vkCmdBindVertexBuffers(
+            cmd_buf,
+            0,
+            1,
+            &vk.vertex_buffer,
+            &vertex_buffer_offsets);
         vkCmdSetViewport(cmd_buf, 0, 1, &viewport);
         vkCmdSetScissor(cmd_buf, 0, 1, &scissor);
         vkCmdDraw(cmd_buf, 3, 1, 0, 0);
@@ -1301,6 +1458,8 @@ int main()
 
     // TODO(mfritz): Replace allocator FOR ALL.
     {
+        vkDestroyBuffer(vk.logical_dev, vk.vertex_buffer, NULL);
+        vkFreeMemory(vk.logical_dev, vk.vertex_buffer_memory, NULL);
         for(u64 i = 0; i < vk.swap_chain_image_count; i++)
         {
             vkDestroyFence(vk.logical_dev, vk.frame_fence[i], NULL);
